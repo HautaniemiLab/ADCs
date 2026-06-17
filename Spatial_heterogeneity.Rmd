@@ -1,0 +1,267 @@
+---
+title: "Spatial Heterogeneity"
+author: "Elsi Pöllänen"
+date: "2026-06-09"
+output: pdf_document
+---
+
+
+## Linear mixed effects model and estimated marginal means
+
+The below described workflow was separately ran for pretreatment and interval debulking surgery sample subsets. 
+
+```{r pretreatment model, echo=FALSE}
+
+library(tidyr)
+library(dplyr)
+library(lme4)
+library(stringr)
+library(emmeans)
+library(ggplot2)
+library(ggcompare)
+library(ggbeeswarm)
+library(MuMIn)
+
+data_subset <- read.table("~/data.csv")
+biomarkers <- c("TACSTD2", "F3", "NECTIN4", "ERBB2", "EGFR", "FOLR1", "CD22")
+
+#------------------------------------------------------------------------------ Linear mixed effects model for each ADC-target:
+
+model_results <- lapply(biomarkers, function(y) {
+  formula <- as.formula(paste(y, "~ site + (1|patient) + (1|site:patient)"))
+  lmer(formula, data = data_subset)
+})
+
+names(model_results) <- biomarkers
+
+#------------------------------------------------------------------------------ Estimated marginal means ADC-target:
+
+emmeans_data <- lapply(model_results, function(model) {
+  
+  predicted_fixed <- emmeans(model, ~ site)  
+  
+  emmeans_result <- as.data.frame(predicted_fixed)
+  emmeans_result$Model <- deparse(formula(model)) 
+  return(emmeans_result)
+  
+})
+
+
+# Combining all into one data frame
+emmeans_df <- do.call(rbind, emmeans_data)
+emmeans_df <- emmeans_df[complete.cases(emmeans_df$emmean),]
+
+
+
+emmeans_df$Gene <- sub(" ~.*", "", emmeans_df$Model)
+
+#------------------------------------------------------------------------------ Statististical significance:
+
+significance_p <- lapply(model_results, function(model) {
+  
+  emms <- emmeans(model, ~ site)  
+  
+  p_vals <- contrast(emms, method = "pairwise") %>%as.data.frame() 
+  
+  p_vals$Model <- deparse(formula(model)) 
+  return(p_vals)
+})
+
+final_p_vals_p <- do.call(rbind, significance_p)
+
+final_p_vals_p$p_adj <- p.adjust(final_p_vals_p$p.value, method = "BH")
+
+significant_pvals_p <- final_p_vals_p[which(final_p_vals_p$p_adj < 0.05),]
+
+significant_pvals_p$Gene <- sub(" ~.*", "", significant_pvals_p$Model)
+
+significant_pvals_p <- significant_pvals_p %>%
+  mutate(label = paste0("p = ", signif(p_adj, 3)))
+
+significant_pvals_p <-  emmeans_df %>%
+  group_by(Gene) %>%
+  summarise(ymax = max(emmean)) %>%
+  left_join(significant_pvals_p, by = "Gene") %>%
+  mutate(y.position = ymax + 1) %>% as.data.frame()
+
+
+significant_pvals_p <- significant_pvals_p[complete.cases(significant_pvals_p$label),]
+
+significant_pvals_p$ymin <- str_match(significant_pvals_p$contrast, "([A-Z][a-z]+)[ ][-][ ]([A-Z][a-z]+)")[,2]
+significant_pvals_p$ymax <- str_match(significant_pvals_p$contrast, "([A-Z][a-z]+)[ ][-][ ]([A-Z][a-z]+)")[,3]
+
+significant_pvals_p <- significant_pvals_p[complete.cases(significant_pvals_p$contrast),]
+
+significant_pvals_p_splitted <- split(significant_pvals_p, significant_pvals_p$Gene)
+
+results <- lapply(significant_pvals_p_splitted,  function(model) {
+ 
+   a = seq(0, 1, 0.1)
+  
+    for (i in 1:nrow(model)) {
+        model$y.position2[i] <- model$y.position[i] + a[i]
+        
+    }
+  
+  return(model)
+})
+
+final_results <- do.call(rbind, results)
+
+```
+
+## Sources of heterogeneity
+
+The below described workflow was separately ran for pretreatment and interval debulking surgery sample subsets. 
+
+```{r, Heterogeneity proportions}
+#------------------------------------------------------------------------------ Computing tumorsite heterogeneity sources.
+#------------------------------------------------------------------------------ Pretreatment.
+
+p_models <- model_results
+
+p_var <- lapply(p_models, function(model){
+  
+  fixed <- data.frame(fixed = var(predict(model, re.form = NA)))
+  random <- as.data.frame(VarCorr(model),comp="Variance")
+  
+  fixed[, "inter_patient"] <- random$vcov[which(random$grp == "patient")]
+  fixed[, "site_patient"] <- random$vcov[which(random$grp == "site:patient")]
+  fixed[, "intra_patient"] <- fixed$fixed + fixed$site_patient
+  fixed[, "residual"] <- random$vcov[which(random$grp == "Residual")]
+  
+  return(as.data.frame(fixed))
+  
+})
+
+pretreatment <- do.call(rbind, p_var)
+
+#------------------------------------------------------------------------------ Saving the total variances for each variable.
+
+pretreatment_var <- pretreatment
+pretreatment_var$Gene <- rownames(pretreatment_var)
+pretreatment_var <- pretreatment_var[,-which(colnames(pretreatment_var) %in% c("fixed", "site_patient"))]
+
+d_var_long <- pivot_longer(pretreatment_var, cols = -Gene, values_to = "Variance", names_to = "Source of heterogeneity") %>% as.data.frame()
+d_var_long$group <- "pretreatment"
+
+#------------------------------------------------------------------------------ Counting the proportions of variance explained by each variable.
+
+pretreatment_proportions <- pretreatment/rowSums(pretreatment[,which(colnames(pretreatment) %in% c( "inter_patient", "intra_patient", "residual"))])
+pretreatment_proportions <- pretreatment_proportions[,which( colnames(pretreatment_proportions) %in% c("inter_patient", "intra_patient", "residual"))]
+
+#------------------------------------------------------------------------------ R2 extraction: 
+
+Rsquared <- lapply(p_models, function(model) {
+  data.frame(
+    r.squaredGLMM(model)
+  )
+})
+
+Rsquared_results_p <- do.call(rbind, Rsquared) 
+
+
+Rsquared_results_p <- cbind(Rsquared_results_p, pretreatment_proportions)
+
+colnames(Rsquared_results_p) <- c("R2m_pretreatment", "R2c_pretreatment", "Inter-patient_pretreatment", "Intra-patient_pretreatment", "Residual_pretreatment")
+
+Rsquared_results_p <- round(Rsquared_results_p, digits = 3)
+
+pretreatment_proportions$gene <- rownames(pretreatment_proportions)
+pretreatment_proportions$group <- "Pretreatment"
+
+long_pretreatment <- pivot_longer(pretreatment_proportions, cols = -c(gene, group), values_to = "Proportion of variance explained", names_to = "Source of heterogeneity") %>% as.data.frame()
+
+```
+
+## Decision boundary and mean difference of low and high expression regions
+
+```{r folr1 scatterplot of adnex metastasis dynamic,  fig.width=12, fig.height=10, echo=FALSE}
+
+#------------------------------------------------------------------------------ Extracting the patients with both, adnex and metastasis samples: 
+
+
+x <- as.data.frame(table(data_subset$patient))
+
+for (i in 1:nrow(data_subset)) {
+  
+  data_subset$nro_samples[i] <- x$Freq[which(x$Var1 == data_subset$patient[i])]
+  
+}
+
+empty <- data.frame(pat = unique(data_subset$patient))
+
+for (j in 1:length(unique(data_subset$patient))) {
+  
+  y <- data_subset[which(data_subset$patient == unique(data_subset$patient)[j]),]
+  empty[which(empty$pat == unique(data_subset$patient)[j]), "select"] <- ifelse(length(unique(y$site)) > 1, 1,0)
+  
+}
+
+data_subset <- data_subset[which(data_subset$patient %in% empty$pat[which(empty$select == 1)]),]
+
+longer <- pivot_longer(data_subset, cols = -c("patient", "tissue", "phase", "site", "sample", "nro_samples"), values_to = "Expression", names_to = "Gene") %>% as.data.frame()
+
+
+#------------------------------------------------------------------------------ Exhaustively matching all available adnex samples with all available metatasis samples for each patient.
+
+splitted_longer <- split(longer,longer$patient)
+
+listed <- lapply(splitted_longer,  function(x) {
+  
+  all_combos <- expand.grid(Adnex_sample = unique(x$sample[which(x$site == "Adnex")]), Metastasis_sample = unique(x$sample[which(x$site == "Metastasis")]))
+  
+})
+
+final <- as.data.frame(do.call(rbind, listed))
+
+
+#------------------------------------------------------------------------------ Adding gene expressions to table and assigning each row to either low or high expression group. This part was run for each target. Only FOLR1 example shown here.
+
+
+for (i in 1:nrow(final)) {
+  
+  final$adnex_expression_FOLR1[i] <- longer$Expression[which(longer$sample == final$Adnex_sample[i] & longer$Gene == "FOLR1")]
+  final$metastasis_expression_FOLR1[i] <- longer$Expression[which(longer$sample == final$Metastasis_sample[i] & longer$Gene == "FOLR1")]
+  
+  
+}
+
+
+final$FOLR1_group <- ifelse(
+  final$metastasis_expression_FOLR1 > (-final$adnex_expression_FOLR1 + emmeans_df$emmean[which(emmeans_df$Gene == "FOLR1" & emmeans_df$site == "Pretreatment adnex")]*2),
+  "above",
+  ifelse(
+    final$metastasis_expression_FOLR1 < (-final$adnex_expression_FOLR1 + emmeans_df$emmean[which(emmeans_df$Gene == "FOLR1" & emmeans_df$site == "Pretreatment adnex")]*2),
+    "below",
+    "on_line"
+  )
+) 
+
+
+#------------------------------------------------------------------------------ Counting the mean difference for the low and high expression groups for each target.
+
+
+mean_difference <- as.data.frame(matrix(NA, 7, 2))
+colnames(mean_difference) <- c("below", "above")
+
+for (i in 1:length(biomarkers)) {
+  
+  subset <- final[,grep(biomarkers[i], colnames(final))]
+  
+  subset$difference <- abs(subset[,grep("adnex", colnames(subset))] - subset[,grep("metastasis", colnames(subset))])
+  
+  above <- subset[which(subset[,grep("group", colnames(subset))] == "above"),]
+  below <- subset[which(subset[,grep("group", colnames(subset))] == "below"),]
+  
+  rownames(mean_difference)[i] <- biomarkers[i]
+  mean_difference$above[i] <- mean(above$difference)
+  mean_difference$below[i] <- mean(below$difference)
+                  
+}
+
+
+```
+
+
+

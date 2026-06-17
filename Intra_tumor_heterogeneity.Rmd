@@ -1,0 +1,94 @@
+---
+title: "Intra-tumor heterogeneity"
+author: "Elsi Pöllänen"
+date: "2026-06-09"
+output: pdf_document
+---
+
+
+
+```{r, echo = F}
+
+library(ggplot2)
+library(Seurat)
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(tibble)
+
+q <- readRDS('Thresholds for the quartiles')
+
+biomarkers_for_manuscript <- c("TACSTD2", "F3", "NECTIN4", "ERBB2", "EGFR", "FOLR1", "CD22")
+
+ovca <- readRDS("Ovarian cancer cell subset")
+
+```
+
+
+
+```{r}
+
+#-------------------------------------------------------------------
+
+
+sample_list = SplitObject(ovca, "sample")
+factors = names(sample_list)
+
+
+proportions = lapply(sample_list, function(x) {
+  
+  expression_data <- x[['RNA']]@data
+  
+  results <- as.data.frame(matrix(NA, length(biomarkers_for_manuscript), 1))
+  colnames(results) <- "cell_proportion"
+    
+  biomarker_data <- expression_data[which(rownames(expression_data) %in% biomarkers_for_manuscript),] %>% as.data.frame()
+
+  for(i in 1:nrow(biomarker_data)){
+
+    results$cell_proportion[i] <- sum(biomarker_data[i,]>q[[3]])/ncol(biomarker_data) # q[[3]] is the high expression threshold in single cell data
+    rownames(results)[i] <- rownames(biomarker_data)[i]
+
+  }
+  
+  return(results)
+
+})
+
+
+
+combined <- bind_rows(lapply(proportions, rownames_to_column, var = "gene"), .id = "sample")
+combined
+
+
+#-------------------------------------------------------------------
+
+
+combined$patient <- str_match(combined$sample, "patient IDs")
+
+for (i in 1:nrow(combined)) {
+  
+  combined$nro_cells[i] <- table(ovca$sample)[[combined$sample[i]]]
+
+  }
+
+#------------------------------------------------------------------- Filtering only samples with more than 40 cells.
+
+samples_to_keep <- unique(combined$sample[which(combined$nro_cells >= 40)])
+combined_final <- combined[which(combined$sample %in% samples_to_keep),]
+
+#------------------------------------------------------------------- Splitting these into gene specific tables to count the amount of intra-tumor homogeneous patients. For the patient to be positive (intra-tumor homogeneous), all available samples are required to have at least 75% of the cells passing the high expression threshold.
+
+proportions_list <- split(combined_final, combined_final$gene)
+
+
+no_patients <- lapply(proportions_list, function(x) {
+  valid_vars <- aggregate(cell_proportion ~ patient, data = x, function(y) all(y >= 0.75))
+  keep_vars <- valid_vars$patient[valid_vars$cell_proportion]
+
+  return(keep_vars)
+})
+
+#------------------------------------------------------------------- no_patients have the list of positive patients for each gene.
+
+```
